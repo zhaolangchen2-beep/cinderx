@@ -3338,18 +3338,6 @@ bool HIRBuilder::tryInlineTupleGenexprCall(
     return false;
   }
 
-  BasicBlock* resume_block = nullptr;
-  if (!pattern->returns_directly) {
-    JIT_CHECK(
-        pattern->resume_off.has_value(),
-        "tuple genexpr pattern should provide resume offset when not returning");
-    auto resume_it = block_map_.blocks.find(*pattern->resume_off);
-    if (resume_it == block_map_.blocks.end() || resume_it->second == nullptr) {
-      return false;
-    }
-    resume_block = resume_it->second;
-  }
-
   Register* result = temps_.AllocateStack();
   tc.emit<Branch>(inline_result.entry);
   tc.block = inline_result.exit;
@@ -3366,8 +3354,11 @@ bool HIRBuilder::tryInlineTupleGenexprCall(
     }
     tc.emit<Return>(result, ret_type);
   } else {
+    JIT_CHECK(
+        pattern->resume_off.has_value(),
+        "tuple genexpr pattern should provide resume offset when not returning");
     stack.push(result);
-    tc.emit<Branch>(resume_block);
+    tc.emit<Branch>(getBlockAtOff(*pattern->resume_off));
   }
   stop_block_translation_ = true;
   return true;
