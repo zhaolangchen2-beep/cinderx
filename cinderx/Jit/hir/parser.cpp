@@ -42,7 +42,10 @@ void HIRParser::expect(std::string_view expected) {
 Register* HIRParser::allocateRegister(std::string_view name) {
   JIT_CHECK(
       name[0] == 'v', "invalid register name (must be v[0-9]+): {}", name);
-  auto opt_id = parseNumber<int>(name.substr(1));
+  // HIR test inputs may annotate destination registers like `v0:Object`.
+  // The register identity is still the numeric prefix before `:`.
+  auto reg_name = name.substr(0, name.find(':'));
+  auto opt_id = parseNumber<int>(reg_name.substr(1));
   JIT_CHECK(
       opt_id.has_value(), "Cannot parse register '{}' into an integer", name);
   auto id = *opt_id;

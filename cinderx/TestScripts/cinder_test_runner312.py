@@ -40,9 +40,11 @@ import test.libregrtest.logger as libregrtest_logger
 import test.libregrtest.result as libregrtest_result
 import test.libregrtest.results as libregrtest_results
 import test.libregrtest.runtests as libregrtest_runtests
+import test.libregrtest.save_env as libregrtest_save_env
 import test.libregrtest.setup as libregrtest_setup
 import test.libregrtest.single as libregrtest_single
 import test.libregrtest.utils as libregrtest_utils
+import cinderx.jit
 from cinderx.test_support import get_cinderjit_xargs, is_sanitizer_build
 from common import (
     ActiveTest,
@@ -792,12 +794,65 @@ def patch_libregrtest_to_use_loadTestsFromName():
     libregrtest_single._load_run_test = patched__load_run_test
 
 
+def patch_libregrtest_os_environ_snapshot():
+    cls = libregrtest_save_env.saved_test_environment
+    orig_get = cls.get_os_environ
+    orig_restore = cls.restore_os_environ
+
+    def patched_get_os_environ(self):
+        data = getattr(os.environ, "_data", None)
+        if isinstance(data, dict):
+            return id(os.environ), os.environ, data.copy()
+        return orig_get(self)
+
+    def patched_restore_os_environ(self, saved_environ):
+        data = getattr(saved_environ[1], "_data", None)
+        if isinstance(data, dict) and isinstance(saved_environ[2], dict):
+            os.environ = saved_environ[1]
+            data.clear()
+            data.update(saved_environ[2])
+            return
+        orig_restore(self, saved_environ)
+
+    cls.get_os_environ = patched_get_os_environ
+    cls.restore_os_environ = patched_restore_os_environ
+
+
+def patch_libregrtest_save_env_jit_suppress():
+    cls = libregrtest_save_env.saved_test_environment
+    orig_exit = cls.__exit__
+    for name in (
+        "get_os_environ",
+        "restore_os_environ",
+        "get_multiprocessing_process__dangling",
+        "restore_multiprocessing_process__dangling",
+    ):
+        setattr(cls, name, cinderx.jit.jit_suppress(getattr(cls, name)))
+
+    def patched_exit(self, *args, **kwargs):
+        old_threshold = cinderx.jit.get_compile_after_n_calls()
+        cinderx.jit.compile_after_n_calls(1000000)
+        try:
+            return orig_exit(self, *args, **kwargs)
+        finally:
+            cinderx.jit.compile_after_n_calls(0 if old_threshold is None else old_threshold)
+
+    cls.__exit__ = patched_exit
+
+
+def should_patch_save_env_jit_suppress():
+    return os.environ.get("CINDERX_DISABLE_SAVE_ENV_JIT_SUPPRESS") != "1"
+
+
 def user_selected_main(args):
     sys.argv[1:] = args.rest[1:]
 
     sys.path.insert(0, str(get_cinderx_dir() / "PythonLib"))
 
     patch_libregrtest_to_use_loadTestsFromName()
+    patch_libregrtest_os_environ_snapshot()
+    if should_patch_save_env_jit_suppress():
+        patch_libregrtest_save_env_jit_suppress()
 
     fix_env_always_changed_issue()
 
@@ -830,6 +885,9 @@ def user_selected_main(args):
 def worker_main(args):
     sys.path.insert(0, str(get_cinderx_dir() / "PythonLib"))
     patch_libregrtest_to_use_loadTestsFromName()
+    patch_libregrtest_os_environ_snapshot()
+    if should_patch_save_env_jit_suppress():
+        patch_libregrtest_save_env_jit_suppress()
     libregrtest_setup.setup_process()
     with open(args.runtest_config_json_file, "r") as f:
         worker_runtests_dict = json.load(f)

@@ -378,7 +378,9 @@ Type outputTypeWithRecursiveCoroHint(
     case Opcode::kLoadSpecial:
     case Opcode::kLoadTupleItem:
     case Opcode::kMatchKeys:
+      return TObject;
     case Opcode::kSend: {
+      JIT_DCHECK(instr.IsSend(), "expected Send opcode, got {}", instr.opname());
       if (recursive_coro_result_type.has_value() && current_func != nullptr) {
         auto callee = sendCalleeFunction(static_cast<const Send&>(instr));
         if (callee != nullptr) {

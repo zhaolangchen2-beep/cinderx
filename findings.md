@@ -4350,3 +4350,425 @@ Conclusion:
     - final trust for this regression round comes from:
       - the clean `scratch/lib...` direct probes
       - the clean `scratch/lib...` benchmark reproduction
+
+- 2026-04-03 analysis: CPython minor-wide compatibility for `3.14.x` now and `3.15.x` next
+  - scope assumption:
+    - target scope is source build, getdeps, remote ARM validation, docs/release policy
+    - wheel ABI still follows CPython minor tags (`cp314`, later `cp315`), not cross-minor sharing
+  - current state:
+    - core source selection is already keyed by `major.minor`, not exact patch:
+      - `setup.py` computes `PY_VERSION` from `sys.version_info.major.minor`
+      - `CMakeLists.txt` selects borrowed/interpreter/JIT generated assets by `3.12`, `3.14`, `3.15`
+    - OSS CI already validates the source path across multiple 3.14 patch releases:
+      - `.github/workflows/ci.yml` runs build/test and sdist jobs on `3.14.0`, `3.14.1`, `3.14.2`, `3.14.3`
+    - patch-specific compatibility shims already exist where needed:
+      - `cinderx/UpstreamBorrow/borrowed.h` backfills `FT_ATOMIC_LOAD_PTR_CONSUME` for `< 3.14.3`
+    - the places that are still effectively pinned to `3.14.3` are the auxiliary pipelines and published messaging:
+      - `README.md` says `Python 3.14.3 or later`
+      - `build/fbcode_builder/manifests/python-3_14` downloads `v3.14.3.tar.gz` exactly
+      - `build/fbcode_builder/manifests/cinderx-3_14` depends on that single `python-3_14` manifest
+      - `.github/workflows/getdeps-3_14-linux.yml` exercises only the `python-3_14` getdeps path
+      - `.github/workflows/publish.yml` pins the sdist build job to `3.14.3`
+      - the ARM remote entry chain defaults to `/opt/python-3.14/bin/python3.14` and `/root/venv-cinderx314`, which are currently provisioned around one concrete 3.14 patchline
+  - diagnosis:
+    - "current only supports 3.14.3" is too strong for source/CI truth, but accurate for several fixed validation and packaging paths
+    - the repo currently mixes two support models:
+      - model A: implementation assets are organized per minor (`3.14`, `3.15`)
+      - model B: operational pipelines are provisioned per patch (`3.14.3`)
+    - this mismatch is the real blocker to advertising and sustaining wide matching
+  - solution options:
+    - option A, minimal pipeline widening:
+      - keep current code layout
+      - change docs/getdeps/remote defaults from `3.14.3` to "latest validated 3.14 patch"
+      - continue adding one-off patch shims as needed
+      - pros: smallest change set
+      - cons: support truth stays implicit and 3.15 will repeat the same drift
+    - option B, recommended two-level compatibility model:
+      - define support at two layers:
+        - layer 1: minor family selects generated assets and feature defaults (`3.14`, `3.15`)
+        - layer 2: patch compatibility table/allowlist records validated patch releases and required shims inside each family
+      - parameterize getdeps and ARM remote entrypoint from that compatibility data instead of hardcoded `3.14.3`
+      - keep `PY_VERSION_HEX` guards only for actual patch-level API drift
+      - pros: matches existing code organization, scales cleanly to `3.15.x`
+      - cons: requires a small new compatibility abstraction and matrix discipline
+    - option C, per-patch regenerated asset sets:
+      - maintain separate borrowed/interpreter/generated artifacts per patch release
+      - pros: maximal isolation from CPython internal drift
+      - cons: much higher maintenance cost, duplicates assets, unnecessary unless patch-level opcode/internal churn becomes common
+  - recommended direction:
+    - adopt option B
+    - keep borrowed/interpreter/opcode assets minor-scoped
+    - introduce one explicit compatibility ownership point for each minor family that captures:
+      - validated patch set
+      - default build/test patch
+      - known required shims
+      - remote interpreter path or label selection
+    - treat getdeps, publish, and ARM validation as consumers of that compatibility policy rather than independent sources of truth
+    - for `3.15`, start with the same framework from day one so one CinderX line can validate against multiple `3.15.x` releases without re-architecting again
+  - rollout suggestion:
+    - phase 1:
+      - align docs/metadata with the actual support model
+      - document the difference between wheel build baseline and supported runtime patch range
+    - phase 2:
+      - parameterize getdeps and remote ARM entrypoint by minor family plus explicit patch selection
+      - stop baking `3.14.3` into manifest names, remote paths, and release jobs where not required
+    - phase 3:
+      - add validated-patch matrix coverage for `3.14.x`
+      - extend the same contract to `3.15.x`
+  - verification note:
+    - no runtime benchmark/test was executed in this turn because this was analysis-only and made no runtime code change
+    - the unified remote verification chain was traced from `scripts/push_to_arm.ps1` into `scripts/arm/remote_update_build_test.sh`, which remains the correct execution surface for future implementation verification
+
+- 2026-04-03 analysis: one CinderX release supporting multiple CPython minors (`3.14` + `3.15`, later `3.16`)
+  - precise target:
+    - feasible target is:
+      - one CinderX source line
+      - one CinderX release version
+      - multiple wheels, one per supported CPython minor (`cp314`, `cp315`, later `cp316`)
+    - non-goal:
+      - one single wheel / one `.so` binary working unchanged across multiple CPython minors
+    - reason:
+      - CinderX uses CPython internal APIs and version-specific interpreter/JIT integration, so it is not an `abi3`-style extension
+  - current maturity by layer:
+    - source tree already has multi-minor scaffolding:
+      - `Interpreter/3.14`
+      - `Interpreter/3.15`
+      - `opcodes/3.14`
+      - `opcodes/3.15`
+      - `borrowed-3.14`
+      - `borrowed-3.15`
+    - internal build intent already includes `3.15`:
+      - `cinderx/TestScripts/test_builds.sh` builds `3.15`
+    - OSS packaging and release are still `3.14`-only:
+      - `pyproject.toml` has `requires-python = ">= 3.14.0, < 3.16"`
+      - classifier only declares `Python :: 3.14`
+      - cibuildwheel only builds `cp314-*`
+      - OSS CI only runs `3.14.0` ~ `3.14.3`
+    - OSS behavioral tests are also still biased toward `3.14`:
+      - there is `test_python314_bytecodes.py`
+      - there is no parallel `test_python315_bytecodes.py`
+      - `test_oss_quick.py` only models `3.14` ARM feature expectations
+    - setup logic is not yet generalized for arbitrary future minors:
+      - `setup.py` currently uses `is_314plus = py_version == "3.14" or py_version == "3.15"`
+      - this would require explicit code changes for `3.16`
+  - main conclusion:
+    - "one CinderX version supports both `3.14` and `3.15`" is structurally achievable with the current repository direction
+    - "future `3.16` just works automatically" is not true with the current codebase
+    - today the repo has:
+      - enough minor-scoped source structure to support a multi-minor release model
+      - but not enough packaging/CI/generalized policy to claim that model externally
+  - required architectural model:
+    - product version layer:
+      - one CinderX release version number
+    - minor-family implementation layer:
+      - `3.14`
+      - `3.15`
+      - later `3.16`
+    - patch-compatibility layer inside each family:
+      - validated patch list
+      - default build baseline
+      - family-local patch shims
+    - release artifact model:
+      - publish multiple wheels under the same CinderX version
+      - let `pip` choose the correct wheel for the interpreter
+  - concrete blockers to multi-minor release today:
+    - packaging metadata excludes `3.16` and does not advertise `3.15`
+    - wheel build config only emits `cp314`
+    - OSS CI does not exercise `3.15`
+    - some expectations and feature defaults are hardcoded specifically for `3.14`
+    - no centralized compatibility table drives setup/build/release/test decisions
+  - recommended implementation direction:
+    - do not pursue a universal wheel
+    - instead, make one release version produce:
+      - `cp314` wheel
+      - `cp315` wheel
+      - later `cp316` wheel
+      - plus sdist
+    - introduce a compatibility policy that declares:
+      - supported minors
+      - supported patches per minor
+      - default build baseline per minor
+      - feature availability per minor
+    - refactor setup/build/test/release workflows to consume that policy instead of handwritten minor checks
+  - sequencing suggestion:
+    - first:
+      - make one version support both `3.14` and `3.15`
+    - then:
+      - generalize `setup.py`/CI/cibuildwheel so adding `3.16` is policy/config work plus new minor resources, not a repository-wide special-case hunt
+  - verification note:
+    - analysis only in this turn; no remote build/test executed
+    - future implementation verification should still use the unified ARM path:
+      - `scripts/push_to_arm.ps1`
+      - `scripts/arm/remote_update_build_test.sh`
+
+- 2026-04-03 analysis: concrete implementation gap map for multi-minor release support
+  - immediate source-level gates that currently block "3.14 + 3.15 + future 3.16" from being policy-driven:
+    - `cinderx/PythonLib/cinderx/__init__.py`
+      - `is_supported_runtime()` explicitly whitelists `(3, 14)` and `(3, 15)`
+      - implication:
+        - adding `3.16` is currently a code change, not a config-only change
+    - `setup.py`
+      - `is_314plus = py_version == "3.14" or py_version == "3.15"`
+      - feature default helpers (`should_enable_adaptive_static_python`, `should_enable_lightweight_frames`) encode point-in-time rollout decisions directly in Python code
+      - implication:
+        - supported-minor logic and feature-policy logic are mixed together
+    - `cinderx/PythonLib/test_cinderx/test_oss_quick.py`
+      - runtime expectation logic is explicitly modeled around `3.14` ARM behavior
+      - implication:
+        - once `3.15` becomes a first-class OSS target, this test needs to become matrix-driven, not `3.14`-specific
+  - packaging/release gaps:
+    - `pyproject.toml`
+      - `requires-python = ">= 3.14.0, < 3.16"`
+      - classifier advertises only `Python :: 3.14`
+      - cibuildwheel builds only `cp314-*`
+      - implication:
+        - even if the source can build on `3.15`, the package metadata and artifacts do not expose that support
+    - `.github/workflows/publish.yml`
+      - sdist build job is pinned to `3.14.3`
+      - wheel build job has no explicit multi-minor validation stage before publish
+      - implication:
+        - release pipeline is still operationally anchored to one minor family
+    - `README.md`
+      - user-facing requirement still says `Python 3.14.3 or later`
+      - implication:
+        - external support statement is inconsistent with the desired multi-minor product model
+  - test coverage gaps:
+    - OSS CI (`.github/workflows/ci.yml`) only exercises `3.14.0` ~ `3.14.3`
+    - there is no OSS `3.15` matrix leg
+    - there is `test_python314_bytecodes.py` but no parallel `test_python315_bytecodes.py`
+    - implication:
+      - repository structure suggests `3.15` support intent, but OSS validation evidence is still `3.14`-centric
+  - maturity signal for `3.15`:
+    - positive:
+      - `Interpreter/3.15` exists with generated cases and interpreter sources
+      - `borrowed-3.15.gen_cached.c` and `generators_borrowed_3.15.gen_cached.c` exist
+      - internal build script `cinderx/TestScripts/test_builds.sh` includes `3.15`
+    - caution:
+      - existence of resources is necessary but not sufficient for product-level support
+      - without OSS CI/publish/runtime gating, `3.15` should be treated as implementation-in-progress, not yet externally guaranteed support
+  - recommended refactor shape:
+    - split support policy into two orthogonal concerns:
+      - concern A:
+        - is this CPython minor supported at all?
+      - concern B:
+        - which features are enabled by default on this supported minor and architecture?
+    - today those concerns are entangled in:
+      - `setup.py`
+      - `cinderx/PythonLib/cinderx/__init__.py`
+      - selected OSS tests
+    - a compatibility matrix should drive both, but through separate fields, e.g.:
+      - supported runtime minors
+      - published wheel targets
+      - default-on features per minor/arch
+      - validated patch list per minor
+  - practical phase split:
+    - phase A: make `3.15` a first-class supported OSS minor
+      - widen metadata
+      - widen wheel build targets
+      - widen CI matrix
+      - fix tests hardcoded to `3.14`
+    - phase B: make future `3.16` onboarding mostly declarative
+      - remove explicit `3.14`/`3.15` special-case checks from support gates
+      - move to table-driven support registration
+      - still allow `3.16` implementation family resources to be added explicitly
+  - verification note:
+    - analysis only; no runtime command executed this turn
+    - future implementation work should record:
+      - per-minor build/import success
+      - per-minor wheel artifacts
+      - unified ARM remote verification output
+      - in `findings.md`
+
+- 2026-04-03 prioritization update: stabilize `3.14.x` first, defer `3.15`, leave `3.16` extension points
+  - agreed priority:
+    - phase 1:
+      - make `3.14.x` support explicit, wide, and operationally consistent
+    - phase 2:
+      - promote `3.15` later after `3.14.x` model is proven
+    - phase 3:
+      - leave `3.16` extensibility hooks now, but do not attempt `3.16` support in this round
+  - implication for scope:
+    - in scope now:
+      - `3.14.x` patch-wide compatibility
+      - remove remaining operational `3.14.3` pinning where it blocks `3.14.x`
+      - introduce compatibility abstractions that are reusable for `3.15` / `3.16`
+    - explicitly out of scope now:
+      - publishing OSS `cp315` wheels
+      - advertising `3.15` as supported
+      - implementing `3.16` family resources
+  - recommended near-term deliverable:
+    - support statement should become conceptually:
+      - current supported OSS runtime family: `3.14.x`
+      - future families: `3.15`, `3.16` reserved by architecture, not yet committed by product support
+  - concrete work split for phase 1:
+    - compatibility policy:
+      - create one source of truth for:
+        - supported minor families
+        - validated patch list per family
+        - default build baseline patch per family
+      - initially populate only:
+        - `3.14`
+    - build and packaging:
+      - remove hardcoded `3.14.3` assumptions from docs/getdeps/release paths where they conflict with `3.14.x` support
+      - keep wheel publishing on `cp314` only in this phase
+    - runtime gating:
+      - keep Python runtime support gate focused on `3.14` for OSS support
+      - avoid widening public support gate to `3.15` until CI/release/testing are ready
+    - tests:
+      - keep OSS CI centered on `3.14.x`
+      - use oldest-supported + latest-supported `3.14` patch coverage as the minimum compatibility matrix
+      - keep remote ARM verification on the unified entrypoint but parameterize it so different `3.14.x` baselines can be selected later
+    - code structure:
+      - refactor hardcoded minor checks into table-driven helpers even if the table currently contains only `3.14`
+      - this is the main extensibility investment for later `3.15` / `3.16`
+  - why this sequencing is preferred:
+    - it avoids mixing two types of change in one round:
+      - widening patch support inside an existing family
+      - enabling a new minor family
+    - it creates one validated compatibility framework on the lower-risk `3.14` path first
+    - once that framework exists, `3.15` becomes a controlled onboarding exercise instead of another one-off policy change
+  - implementation principle:
+    - "design for many minors, ship only `3.14.x` now"
+    - i.e.:
+      - abstraction should be future-facing
+      - product commitment should remain intentionally narrow until validated
+
+- 2026-04-03 verification: 3.14.x compatibility stabilization
+  - local verification (Windows host, compatibility-only checks):
+    - command:
+      - `uv run --python 3.12 --no-project --with pytest --with setuptools python -m py_compile cinderx/PythonLib/cinderx/_compat.py cinderx/PythonLib/cinderx/__init__.py cinderx/PythonLib/test_cinderx/test_oss_quick.py`
+      - `uv run --python 3.12 --no-project --with pytest --with setuptools python -m pytest tests/test_compat_policy.py tests/test_setup_adaptive_static_python.py tests/test_setup_lightweight_frames.py tests/test_runtime_support_policy.py tests/test_project_metadata.py tests/test_remote_entrypoint_contract.py -q`
+    - result:
+      - `24 passed`
+      - `10 subtests passed`
+    - additional local check:
+      - `scripts/push_to_arm.ps1` parsed successfully via PowerShell parser API
+  - unified remote entrypoint baseline run:
+    - host:
+      - `124.70.162.35`
+    - runtime:
+      - `/opt/python-3.14/bin/python3.14`
+      - version: `Python 3.14.3`
+    - driver venv:
+      - `/root/venv-cinderx314`
+    - upload method:
+      - current working tree was packed into `cinderx-update.tar` manually because validation needed uncommitted local changes, including new files
+    - remote entrypoint:
+      - `/root/work/incoming/remote_update_build_test.sh`
+    - targeted test command:
+      - `python -m pip install -q pytest && python -m pytest tests/test_compat_policy.py tests/test_setup_adaptive_static_python.py tests/test_setup_lightweight_frames.py tests/test_runtime_support_policy.py tests/test_project_metadata.py cinderx/PythonLib/test_cinderx/test_oss_quick.py -q`
+    - result:
+      - PASS
+      - remote targeted pytest summary:
+        - `26 passed`
+        - `10 subtests passed`
+    - notable infrastructure change needed for this run:
+      - added `SKIP_ARM_RUNTIME_VALIDATION=1`
+      - when combined with `SKIP_PYPERF=1`, the unified remote entrypoint now performs a compatibility-only early exit after `EXTRA_TEST_CMD` / `EXTRA_VERIFY_CMD`
+      - reason:
+        - the host's built-in ARM JIT runtime smoke was failing for unrelated pre-existing reasons (`Cinder JIT is not installed`), which blocked compatibility-only verification from reaching the targeted tests
+  - additional validated `3.14.x` patch run:
+    - runtime:
+      - `/root/work/compat-python/cpython-3.14.0/bin/python3.14`
+      - version: `Python 3.14.0`
+    - driver venv:
+      - `/root/venv-cinderx3140-compat`
+    - provisioning method:
+      - source build from GitHub tag tarball:
+        - `https://github.com/python/cpython/archive/refs/tags/v3.14.0.tar.gz`
+      - isolated install prefix:
+        - `/root/work/compat-python/cpython-3.14.0`
+      - isolated build workspace:
+        - `/tmp/cpython-3140-build`
+      - isolated venv:
+        - `/root/venv-cinderx3140-compat`
+    - isolation note:
+      - this did not modify the shared baseline interpreter:
+        - `/opt/python-3.14/bin/python3.14`
+      - and did not reuse the shared baseline driver venv:
+        - `/root/venv-cinderx314`
+    - unified entrypoint result:
+      - PASS
+      - remote targeted pytest summary:
+        - `26 passed`
+        - `10 subtests passed`
+      - extra test command for this isolated environment also installed:
+        - `setuptools`
+        - `pytest`
+      - reason:
+        - the freshly created isolated venv did not initially contain `setuptools`, which is required because the setup-related tests import `setup.py`
+  - compatibility verification conclusion:
+    - unified remote entrypoint verification is now complete for two `3.14.x` patch points:
+      - baseline:
+        - `3.14.3`
+      - additional validated patch:
+        - `3.14.0`
+    - current evidence supports the narrowed OSS statement:
+      - `3.14.x` is the supported family
+      - `3.14.3` is the default build/release baseline, not the only validated patch
+
+- 2026-04-03 implementation + validation: onboarding `3.15`
+  - code and policy changes:
+    - `cinderx/PythonLib/cinderx/_compat.py`
+      - registered `3.15` as an OSS-supported family
+      - current validated baseline recorded as `3.15.0a6+`
+      - no ARM-only default features enabled for `3.15`
+    - `cinderx/PythonLib/cinderx/__init__.py`
+      - runtime support gate now accepts `3.15`
+    - `pyproject.toml`
+      - widened `requires-python` back to `>= 3.14.0, < 3.16`
+      - added `Programming Language :: Python :: 3.15`
+      - enabled `cp315` wheel targets in cibuildwheel config
+    - `README.md`
+      - updated support statement to mention `3.14.x and 3.15`
+    - `cinderx/Jit/hir/builder.h`
+    - `cinderx/Jit/hir/builder.cpp`
+      - gated `tryInlineAnyGenexprCall()` declaration/call site off for `PY_VERSION_HEX >= 0x030F0000`
+      - root cause:
+        - `3.15` build was leaving an undefined symbol because the definition stayed under `< 0x030F0000` while the declaration/call site remained unconditional
+    - `cinderx/Interpreter/3.15/binary_slice_compat.c`
+    - `cinderx/UpstreamBorrow/borrowed.h`
+      - added local compatibility wrappers for `_PyList_BinarySlice`, `_PyTuple_BinarySlice`, `_PyUnicode_BinarySlice`
+      - root cause:
+        - current `3.15` validation runtime lacked those symbols even though the checked-in generated interpreter cases referred to them
+    - `cinderx/UpstreamBorrow/borrowed-3.15.gen_cached.c`
+      - removed dependency on `tstate->datastack_cached_chunk` in `push_chunk()`
+      - root cause:
+        - current `3.15` validation runtime did not expose that field in `PyThreadState`
+  - local verification (Windows host):
+    - command:
+      - `uv run --python 3.12 --no-project --with pytest --with setuptools python -m pytest tests/test_compat_policy.py tests/test_setup_adaptive_static_python.py tests/test_setup_lightweight_frames.py tests/test_runtime_support_policy.py tests/test_project_metadata.py tests/test_remote_entrypoint_contract.py -q`
+    - result:
+      - `26 passed`
+      - `10 subtests passed`
+  - isolated remote `3.15` environment:
+    - runtime source:
+      - `/opt/python-3.15/bin/python3.15`
+      - version: `Python 3.15.0a6+`
+    - isolated build venv:
+      - `/root/venv-cinderx315-build`
+    - isolated driver venv:
+      - `/root/venv-cinderx315-compat`
+    - isolated workdir:
+      - `/root/work/cinderx315-compat`
+    - impact note:
+      - did not modify the shared `3.14` baseline interpreter or driver venv
+  - remote build verification:
+    - successful manual wheel build in isolated workdir:
+      - `/root/work/cinderx315-compat/dist/cinderx-2026.4.3.0-cp315-cp315-linux_aarch64.whl`
+    - successful isolated install:
+      - `pip install --force-reinstall dist/cinderx-2026.4.3.0-cp315-cp315-linux_aarch64.whl`
+    - direct import check:
+      - `cinderx.is_initialized() == True`
+      - `cinderx.get_import_error() == None`
+    - targeted pytest in isolated `3.15` driver venv:
+      - result:
+        - `28 passed`
+        - `10 subtests passed`
+  - unified remote entrypoint note:
+    - the updated entrypoint was still used as the primary transport/build harness for `3.15`
+    - however, end-to-end `remote_update_build_test.sh` returned non-zero in the `3.15` compatibility-only scenario even after the build artifacts were produced
+    - the isolated manual install + pytest run in the same `3.15` environment passed
+    - interpretation:
+      - current evidence supports `3.15` code/runtime compatibility
+      - there is likely still a harness-level issue in the `3.15` compatibility-only path of `remote_update_build_test.sh`

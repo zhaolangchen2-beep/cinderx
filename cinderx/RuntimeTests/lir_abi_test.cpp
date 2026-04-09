@@ -1189,7 +1189,8 @@ TEST_F(LIRABITest, TestkBitTest_PhyReg_PhyReg) {
 // kYieldInitial ANY
 TEST_F(LIRABITest, TestkYieldInitial) {
   PyCodeObject code;
-  hir::FrameState frameState(BorrowedRef(&code), nullptr, nullptr, nullptr);
+  BorrowedRef<PyCodeObject> borrowed_code{&code};
+  hir::FrameState frameState(borrowed_code, nullptr, nullptr, nullptr);
 
   hir::Register out(0);
   auto origin = std::unique_ptr<hir::InitialYield>(

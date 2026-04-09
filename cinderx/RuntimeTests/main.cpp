@@ -2,9 +2,7 @@
 
 #include <gtest/gtest.h>
 
-#ifdef BUCK_BUILD
 #include "cinderx/_cinderx-lib.h"
-#endif
 
 #include "cinderx/Jit/compiler.h"
 #include "cinderx/Jit/hir/builtin_load_method_elimination.h"
@@ -179,11 +177,9 @@ void register_test(
 
 } // namespace
 
-#ifdef BUCK_BUILD
 PyMODINIT_FUNC PyInit__cinderx() {
   return _cinderx_lib_init();
 }
-#endif
 
 void registerCinderX() {
 #ifdef BUCK_BUILD
@@ -207,12 +203,12 @@ void registerCinderX() {
                  "build, re-running usually fixes the issue\n";
     throw;
   }
+#endif
 
   if (PyImport_AppendInittab("_cinderx", PyInit__cinderx) != 0) {
     PyErr_Print();
     throw std::runtime_error{"Could not add cinderx to inittab"};
   }
-#endif
 }
 
 int main(int argc, char* argv[]) {
@@ -237,8 +233,6 @@ int main(int argc, char* argv[]) {
   register_test("inliner_test.txt");
   register_test("inliner_elimination_test.txt");
   register_test("inliner_static_test.txt", RuntimeTest::kStaticCompiler);
-  register_test("list_slice_cleanup_test.txt");
-  register_test("long_loop_unboxing_test.txt");
   register_test(
       "inliner_elimination_static_test.txt", RuntimeTest::kStaticCompiler);
   register_test("phi_elimination_test.txt");

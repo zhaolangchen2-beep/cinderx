@@ -57,8 +57,12 @@ class RuntimeTest : public ::testing::Test {
       jit::getMutableConfig().force_init = true;
     }
 
+    Py_NoSiteFlag = 1;
     Py_Initialize();
     ASSERT_TRUE(Py_IsInitialized());
+
+    auto cinderx_mod = Ref<>::steal(PyImport_ImportModule("_cinderx"));
+    ASSERT_NE(cinderx_mod, nullptr);
 
     auto mod_state = cinderx::getModuleState();
     ASSERT_NE(mod_state, nullptr) << "Could not load the CinderX module state, "

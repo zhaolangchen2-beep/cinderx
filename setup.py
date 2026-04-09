@@ -351,7 +351,7 @@ class BuildCommand(build):
     # "build/fbcode_builder/" (auto-added to the OSS view of CinderX).
     def initialize_options(self):
         build.initialize_options(self)
-        self.build_base = "scratch"
+        self.build_base = os.environ.get("CINDERX_BUILD_BASE", "scratch")
 
     def run(self) -> None:
         enable_pgo = is_env_flag_enabled("CINDERX_ENABLE_PGO")

@@ -13,6 +13,7 @@ cmake_minimum_required(VERSION 3.12)
 project(_cinderx)
 
 set(PROJECT_SOURCE_DIR ${PROJECT_SOURCE_DIR}/cinderx)
+set(CINDERX_SOURCE_DIR ${PROJECT_SOURCE_DIR})
 
 ##############################################################################
 # PGO (Profile-Guided Optimization) configuration
@@ -42,12 +43,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(SHARED_FLAGS "-DPy_BUILD_CORE -DPy_BUILD_CORE_MODULE -fPIC -Wall -Wextra -Wno-attributes -Wno-c99-designator -Wno-c++11-narrowing -Wno-cast-function-type -Wno-cast-function-type-mismatch -Wno-deprecated-declarations -Wno-missing-field-initializers -Wno-null-pointer-subtraction -Wno-parentheses -Wno-sign-compare -Wno-unknown-pragmas -Wno-unused-function -Wno-unused-parameter")
 
-option(ENABLE_STATIC_PYTHON "Enable Static Python features" ON)
-if(NOT ENABLE_STATIC_PYTHON AND ENABLE_ADAPTIVE_STATIC_PYTHON)
-  message(WARNING "ENABLE_STATIC_PYTHON=OFF forces ENABLE_ADAPTIVE_STATIC_PYTHON=OFF")
-  set(ENABLE_ADAPTIVE_STATIC_PYTHON OFF)
-endif()
-
 macro(set_flag VAR)
   if(DEFINED ${VAR})
     if(${VAR})
@@ -57,7 +52,6 @@ macro(set_flag VAR)
 endmacro()
 
 set_flag(ENABLE_ADAPTIVE_STATIC_PYTHON)
-set_flag(ENABLE_STATIC_PYTHON)
 set_flag(ENABLE_DISASSEMBLER)
 set_flag(ENABLE_ELF_READER)
 set_flag(ENABLE_EVAL_HOOK)
@@ -71,10 +65,6 @@ set_flag(ENABLE_PEP523_HOOK)
 set_flag(ENABLE_PERF_TRAMPOLINE)
 set_flag(ENABLE_SYMBOLIZER)
 set_flag(ENABLE_USDT)
-
-if(ENABLE_STATIC_PYTHON)
-  set(SHARED_FLAGS "-DCINDER_ENABLE_STATIC_PYTHON ${SHARED_FLAGS}")
-endif()
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SHARED_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SHARED_FLAGS}")
@@ -193,11 +183,13 @@ include(FetchContent)
 ########################################
 # python
 
-find_package(Python ${PY_VERSION} EXACT COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(
+  Python ${PY_VERSION} EXACT
+  COMPONENTS Interpreter Development.Module
+  REQUIRED)
 
 # Some of our files are partially generated from CPython source, and they
 # expect to be able to include files relative to Include/internal.
-set(Python_INCLUDE_DIRS ${Python_INCLUDE_DIRS} "${Python_INCLUDE_DIRS}/internal")
 
 ########################################
 # asmjit
@@ -265,6 +257,22 @@ if(NOT ZLIB_FOUND)
     add_library(ZLIB::ZLIB ALIAS zlib)
   endif()
 endif()
+
+option(BUILD_RUNTIME_TESTS "Build the RuntimeTests gtest binary" OFF)
+
+if(BUILD_RUNTIME_TESTS)
+  FetchContent_Declare(
+    googletest
+    URL https://codeload.github.com/google/googletest/tar.gz/v1.14.0
+    URL_HASH SHA256=8ad598c73ad796e0d8280b082cebd82a630d73e73cd3c70057938a6501bba5d7
+  )
+  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+  find_package(Python ${PY_VERSION} EXACT COMPONENTS Development.Embed REQUIRED)
+endif()
+list(GET Python_INCLUDE_DIRS 0 PYTHON_PRIMARY_INCLUDE_DIR)
+list(APPEND Python_INCLUDE_DIRS "${PYTHON_PRIMARY_INCLUDE_DIR}/internal")
 
 ##############################################################################
 # Build cinderx
@@ -373,7 +381,7 @@ target_link_libraries(static-python PRIVATE fmt::fmt asmjit::asmjit common borro
 # Jit/
 
 file(GLOB_RECURSE JIT_SOURCES ${PROJECT_SOURCE_DIR}/Jit/*.cpp ${PROJECT_SOURCE_DIR}/Jit/*.c)
-list(FILTER JIT_SOURCES EXCLUDE REGEX ".*\.gen_cached\.c")
+list(FILTER JIT_SOURCES EXCLUDE REGEX ".*\\.gen_cached\\.c")
 if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 3.15)
   list(APPEND JIT_SOURCES "${PROJECT_SOURCE_DIR}/Jit/generators_borrowed_${PY_VERSION}.gen_cached.c")
 endif()
@@ -398,7 +406,6 @@ cinderx_apply_first_party_optimizations(parallel-gc)
 # _cinderx.cpp
 
 set(SOURCES
-  # Manually listed out to not accidentally include stuff in .git.
   ${PROJECT_SOURCE_DIR}/_cinderx.cpp
   ${PROJECT_SOURCE_DIR}/_cinderx-lib.cpp
   ${PROJECT_SOURCE_DIR}/async_lazy_value.cpp
@@ -425,3 +432,7 @@ endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "")
 set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX "")
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "_cinderx.so")
+
+if(BUILD_RUNTIME_TESTS)
+  add_subdirectory(${PROJECT_SOURCE_DIR}/RuntimeTests)
+endif()

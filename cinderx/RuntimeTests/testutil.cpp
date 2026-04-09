@@ -39,12 +39,15 @@ struct Reader {
       : file{file}, path{path} {}
 
   char peekChar() {
-    return file.peek();
+    return static_cast<char>(file.peek());
   }
 
   std::string readLine() {
     std::string s;
     if (!std::getline(file, s)) {
+      if (file.eof()) {
+        err("Unexpected EOF reading file {} at line {}", path, line_num + 1);
+      }
       err("Failed reading file {} at line {}, {}",
           path,
           line_num + 1,
@@ -106,7 +109,7 @@ struct Reader {
   }
 
   bool isExhausted() const {
-    return file.eof();
+    return file.peek() == std::ifstream::traits_type::eof();
   }
 
   template <class... Args>
@@ -149,6 +152,9 @@ ScanStatus scanUntilExpected(Reader& reader, std::string_view delim) {
 
   std::string line;
   while (true) {
+    if (reader.isExhausted()) {
+      return ScanStatus::End;
+    }
     line = reader.readLine();
     if (!line.starts_with(kDelimPrefix)) {
       continue;
@@ -183,9 +189,11 @@ ScanStatus scanUntilExpected(Reader& reader, std::string_view delim) {
 } // namespace
 
 std::unique_ptr<HIRTestSuite> ReadHIRTestSuite(const std::string& suite_path) {
-  std::filesystem::path path =
-      std::filesystem::path(__FILE__).parent_path().parent_path().append(
-          suite_path);
+  std::filesystem::path path = suite_path;
+  if (!std::filesystem::exists(path)) {
+    path = std::filesystem::path(__FILE__).parent_path().parent_path().append(
+        suite_path);
+  }
 
   std::ifstream file;
   file.open(path);

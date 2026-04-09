@@ -8,8 +8,7 @@ namespace jit::hir {
 
 std::unique_ptr<AnnotationIndex> AnnotationIndex::from_function(
     BorrowedRef<PyFunctionObject> func) {
-  if (getMutableConfig().emit_type_annotation_guards ||
-      getConfig().specialized_opcodes) {
+  if (getMutableConfig().emit_type_annotation_guards) {
 #if PY_VERSION_HEX >= 0x030E0000
     BorrowedRef<> annotations = PyFunction_GetAnnotations(func);
     if (!PyDict_Check(annotations)) {
