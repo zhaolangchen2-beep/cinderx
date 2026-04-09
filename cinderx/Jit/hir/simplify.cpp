@@ -2824,6 +2824,22 @@ static Register* emitGenericVectorCallClone(
   return call->output();
 }
 
+static Register* emitTypeIsSubtype(
+    Env& env,
+    Register* subtype,
+    Register* supertype) {
+  auto output = env.func.env.AllocateRegister();
+  env.emitRawInstr<CallStatic>(
+      2,
+      output,
+      reinterpret_cast<void*>(PyType_IsSubtype),
+      TCInt32,
+      subtype,
+      supertype);
+  Register* zero = env.emit<LoadConst>(Type::fromCInt(0, TCInt32));
+  return env.emit<PrimitiveCompare>(PrimitiveCompareOp::kNotEqual, output, zero);
+}
+
 static Register* emitBuiltinMinMaxFloatFastPath(
     Env& env,
     Register* target,
@@ -3220,10 +3236,10 @@ Register* simplifyVectorCallStatic(Env& env, const VectorCall* instr) {
   return trySpecializeCCall(env, instr);
 }
 
-// Special case here where we are testing `if isinstance`. In that case we do
-// not want to go through the boxing and then unboxing that we are about to do.
-// Instead, we want to directly provide the result of the unboxed comparison.
-std::optional<std::pair<Instr*, std::vector<Instr*>>> isVectorCallIfIsInstance(
+// Special case here where we are testing a bool-returning predicate in an
+// `if` statement. In that case we do not want to go through boxing and then
+// immediately unboxing the bool result again.
+std::optional<std::pair<Instr*, std::vector<Instr*>>> isVectorCallIfBoolPredicate(
     Env& env,
     const VectorCall* instr) {
   std::vector<Instr*> snapshots;
@@ -3337,6 +3353,15 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
     return env.emit<LoadField>(
         instr->GetOperand(1), "ob_type", offsetof(PyObject, ob_type), TType);
   }
+  if (isBuiltin(target, "id") && instr->numArgs() == 1) {
+    env.emit<UseType>(target, target->type());
+    Register* result = env.emitVariadic<CallStatic>(
+        1,
+        reinterpret_cast<void*>(PyLong_FromVoidPtr),
+        instr->output()->type() | TNullptr,
+        instr->arg(0));
+    return env.emit<CheckExc>(result, *instr->frameState());
+  }
   if (isBuiltin(target, "len") && instr->numArgs() == 1) {
     env.emit<UseType>(target, target->type());
     return env.emit<GetLength>(instr->arg(0), *instr->frameState());
@@ -3353,7 +3378,7 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
     auto compare_type = env.emit<PrimitiveCompare>(
         PrimitiveCompareOp::kEqual, obj_type, type_op);
 
-    // If this is a VectorCall to isinstance and it's being used as the
+    // If this is a bool-returning VectorCall and it's being used as the
     // predicate of an if statement, it will look like:
     //
     //     o1 = VectorCall
@@ -3364,7 +3389,7 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
     // conditional, then unboxing it again to do another comparison. Instead, we
     // can circumvent that by directly using the result of the primitive
     // compare.
-    auto data = isVectorCallIfIsInstance(env, instr);
+    auto data = isVectorCallIfBoolPredicate(env, instr);
     if (data.has_value()) {
       auto& [is_truthy, snapshots] = data.value();
       auto result = is_truthy->output();
@@ -3410,6 +3435,58 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
         [&] { // Slow path
           return env.emit<IsInstance>(obj_op, type_op, *instr->frameState());
         });
+    return env.emit<PrimitiveBoxBool>(cbool_res);
+  }
+  if (isBuiltin(target, "issubclass") && instr->numArgs() == 2 &&
+      instr->GetOperand(1)->type() <= TType &&
+      instr->GetOperand(2)->type() <= TType &&
+      instr->GetOperand(2)->type().hasObjectSpec() &&
+      !(instr->GetOperand(2)->type() <= TTuple)) {
+    auto subtype_op = instr->GetOperand(1);
+    auto supertype_op = instr->GetOperand(2);
+
+    auto compare_type = env.emit<PrimitiveCompare>(
+        PrimitiveCompareOp::kEqual, subtype_op, supertype_op);
+    auto subtype_check = emitTypeIsSubtype(env, subtype_op, supertype_op);
+
+    // issubclass(type(obj), builtin_type) in pprint._safe_repr spends most of
+    // its time on exact builtins. An exact type match is always a valid True
+    // result. For known builtin targets we can also keep subclass semantics on
+    // a direct PyType_IsSubtype slow path instead of the generic Python helper
+    // call.
+    auto data = isVectorCallIfBoolPredicate(env, instr);
+    if (data.has_value()) {
+      auto& [is_truthy, snapshots] = data.value();
+      auto result = is_truthy->output();
+
+      is_truthy->unlink();
+      delete is_truthy;
+
+      for (auto snapshot : snapshots) {
+        snapshot->unlink();
+        delete snapshot;
+      }
+
+      env.emitCondSlowPath(
+          result,
+          compare_type,
+          [&](auto slow_path) {
+            return env.emitInstr<CondBranch>(compare_type, nullptr, slow_path);
+          },
+          [&] { return subtype_check; });
+
+      instr->output()->set_type(TCBool);
+      return result;
+    }
+
+    Register* cbool_res = env.emitCond(
+        [&](BasicBlock* fast_path, BasicBlock* slow_path) {
+          env.emit<CondBranch>(compare_type, fast_path, slow_path);
+        },
+        [&] { // Fast path
+          return compare_type;
+        },
+        [&] { return subtype_check; });
     return env.emit<PrimitiveBoxBool>(cbool_res);
   }
   if (target_type.hasValueSpec(TFunc)) {

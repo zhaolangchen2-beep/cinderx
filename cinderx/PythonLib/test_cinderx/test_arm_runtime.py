@@ -2934,6 +2934,140 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(float(lines[-1]), 5.0, proc.stdout)
 
+    def test_issubclass_of_type_uses_exact_type_fast_path(self) -> None:
+        # Regression guard:
+        # issubclass(type(obj), builtin_type) should expose an exact-type fast
+        # path in HIR while still preserving subclass behavior via fallback.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class FancyList(list):
+                pass
+
+            def is_list_like(obj):
+                return issubclass(type(obj), list)
+
+            for _ in range(10000):
+                is_list_like([])
+                is_list_like(FancyList([1]))
+                is_list_like({})
+
+            assert jit.force_compile(is_list_like)
+            counts = cinderjit.get_function_hir_opcode_counts(is_list_like)
+            print(counts.get("PrimitiveCompare", 0))
+            print(counts.get("CallStatic", 0))
+            print(counts.get("LoadField", 0))
+            print(counts.get("VectorCall", 0))
+            print(is_list_like([]))
+            print(is_list_like(FancyList([1])))
+            print(is_list_like({}))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/issubclass_type_exact_fast_path.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            for name in (
+                "PYTHONJITAUTO",
+                "PYTHONJITLISTFILE",
+                "PYTHONJITENABLEJITLISTWILDCARDS",
+                "PYTHONJITENABLEHIRINLINER",
+                "PYTHONJITSPECIALIZEDOPCODES",
+                "PYTHONJITTYPEANNOTATIONGUARDS",
+            ):
+                env.pop(name, None)
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 7, proc.stdout)
+            self.assertGreaterEqual(int(lines[-7]), 1, proc.stdout)
+            self.assertGreaterEqual(int(lines[-6]), 1, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]), 1, proc.stdout)
+            self.assertEqual(int(lines[-4]), 0, proc.stdout)
+            self.assertEqual(lines[-3], "True", proc.stdout)
+            self.assertEqual(lines[-2], "True", proc.stdout)
+            self.assertEqual(lines[-1], "False", proc.stdout)
+
+    def test_builtin_id_lowers_to_callstatic(self) -> None:
+        # Regression guard:
+        # builtin id(obj) in hot code should avoid the generic VectorCall helper
+        # and lower to a direct static call.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def object_id(obj):
+                return id(obj)
+
+            target = [1, 2, 3]
+            for _ in range(10000):
+                object_id(target)
+
+            assert jit.force_compile(object_id)
+            counts = cinderjit.get_function_hir_opcode_counts(object_id)
+            print(counts.get("CallStatic", 0))
+            print(counts.get("VectorCall", 0))
+            print(object_id(target) == id(target))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/builtin_id_callstatic.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            for name in (
+                "PYTHONJITAUTO",
+                "PYTHONJITLISTFILE",
+                "PYTHONJITENABLEJITLISTWILDCARDS",
+                "PYTHONJITENABLEHIRINLINER",
+                "PYTHONJITSPECIALIZEDOPCODES",
+                "PYTHONJITTYPEANNOTATIONGUARDS",
+            ):
+                env.pop(name, None)
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 3, proc.stdout)
+            self.assertGreaterEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(lines[-1], "True", proc.stdout)
+
     def test_from_import_math_sqrt_cdouble_lowers_to_double_sqrt(self) -> None:
         self.skipTest("current ARM JIT does not expose DoubleSqrt lowering")
         # Regression guard:
