@@ -13,6 +13,7 @@ cmake_minimum_required(VERSION 3.12)
 project(_cinderx)
 
 set(PROJECT_SOURCE_DIR ${PROJECT_SOURCE_DIR}/cinderx)
+set(CINDERX_SOURCE_DIR ${PROJECT_SOURCE_DIR})
 
 ##############################################################################
 # PGO (Profile-Guided Optimization) configuration
@@ -156,11 +157,13 @@ include(FetchContent)
 ########################################
 # python
 
-find_package(Python ${PY_VERSION} EXACT COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(
+  Python ${PY_VERSION} EXACT
+  COMPONENTS Interpreter Development.Module
+  REQUIRED)
 
 # Some of our files are partially generated from CPython source, and they
 # expect to be able to include files relative to Include/internal.
-set(Python_INCLUDE_DIRS ${Python_INCLUDE_DIRS} "${Python_INCLUDE_DIRS}/internal")
 
 ########################################
 # asmjit
@@ -213,6 +216,22 @@ file(COPY ${usdt_SOURCE_DIR}/usdt.h DESTINATION ${USDT_DIR})
 # zlib
 
 find_package(ZLIB)
+
+option(BUILD_RUNTIME_TESTS "Build the RuntimeTests gtest binary" OFF)
+
+if(BUILD_RUNTIME_TESTS)
+  FetchContent_Declare(
+    googletest
+    URL https://codeload.github.com/google/googletest/tar.gz/v1.14.0
+    URL_HASH SHA256=8ad598c73ad796e0d8280b082cebd82a630d73e73cd3c70057938a6501bba5d7
+  )
+  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+  find_package(Python ${PY_VERSION} EXACT COMPONENTS Development.Embed REQUIRED)
+endif()
+list(GET Python_INCLUDE_DIRS 0 PYTHON_PRIMARY_INCLUDE_DIR)
+list(APPEND Python_INCLUDE_DIRS "${PYTHON_PRIMARY_INCLUDE_DIR}/internal")
 
 ##############################################################################
 # Build cinderx
@@ -315,7 +334,7 @@ target_link_libraries(static-python PRIVATE fmt::fmt asmjit::asmjit common borro
 # Jit/
 
 file(GLOB_RECURSE JIT_SOURCES ${PROJECT_SOURCE_DIR}/Jit/*.cpp ${PROJECT_SOURCE_DIR}/Jit/*.c)
-list(FILTER JIT_SOURCES EXCLUDE REGEX ".*\.gen_cached\.c")
+list(FILTER JIT_SOURCES EXCLUDE REGEX ".*\\.gen_cached\\.c")
 if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 3.15)
   list(APPEND JIT_SOURCES "${PROJECT_SOURCE_DIR}/Jit/generators_borrowed_${PY_VERSION}.gen_cached.c")
 endif()
@@ -338,7 +357,6 @@ add_library(parallel-gc ${PARALLEL_GC_SOURCES})
 # _cinderx.cpp
 
 set(SOURCES
-  # Manually listed out to not accidentally include stuff in .git.
   ${PROJECT_SOURCE_DIR}/_cinderx.cpp
   ${PROJECT_SOURCE_DIR}/_cinderx-lib.cpp
   ${PROJECT_SOURCE_DIR}/async_lazy_value.cpp
@@ -364,3 +382,7 @@ endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "")
 set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX "")
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "_cinderx.so")
+
+if(BUILD_RUNTIME_TESTS)
+  add_subdirectory(${PROJECT_SOURCE_DIR}/RuntimeTests)
+endif()
